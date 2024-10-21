@@ -12,6 +12,7 @@ import tkinter as tk
 from api_consts import GET_DATA_URL, UPDATE_QUEUE_URL, PRINTERS_LIST_URL
 from api_client import ApiClient
 from print_request import PrintRequest
+from printer import Printer
 
 
 ## Global variables
@@ -20,10 +21,40 @@ is_running = False
 auth_token = None
 
 
+def get_printers_list():
+    url = f"{base_url}{PRINTERS_LIST_URL}{auth_token}"
+    api_client = ApiClient(url=url, method="GET")
+
+    response = api_client.execute()
+
+    if response["success"]:
+        printers = response["data"]["items"]
+
+        for p in printers:
+            printers_list.insert(tk.END, p["printer_name_at_location"])
+
+
+## Save server base url and auth token in local memory
+## then starts the service
+def set_api_url():
+    global base_url
+    global auth_token
+
+    base_url = urlField.get()
+    auth_token = tokenField.get() 
+
+    get_printers_list()
+    
+    ## Run the service in a different thread to not block GUI functionalities
+    thread = threading.Thread(target=start, daemon=True)
+    thread.start()
+
+
 ## Start the service
 def start():
     global is_running
     is_running = True
+    status.config(fg="green", text="Active")
     orders_url = f"{base_url}{GET_DATA_URL}{auth_token}"
 
     ## Run until "stop" is pressed
@@ -45,13 +76,11 @@ def start():
                 ## Printer found
                 if printer_ip is not None:
                     template_content = order.data
-                    temp_file_path = save_temp_file(seq_no, template_content)
 
-                    ## HTML file is saved
-                    if temp_file_path is not None and os.path.exists(temp_file_path):
-                        port = 9100 ## Default port
+                    if template_content is not None:
+                        printer = Printer(ip=printer_ip, content=template_content)
                         
-                        is_printed = print_to_printer(printer_ip, port, temp_file_path)
+                        is_printed = printer.print()
 
                         if is_printed:
                             ## update printing sequence
@@ -59,7 +88,7 @@ def start():
 
                         else:
                             ## show error
-                            pass
+                            print("AAAAAA")
 
                 ## Printer was not found
                 else:
@@ -73,6 +102,8 @@ def start():
                 if not is_running:
                     break
 
+        else:
+            print(response)
         ## Wait n of seconds before fetching new orders
         time.sleep(5)
 
@@ -81,25 +112,16 @@ def start():
 def stop():
     global is_running
     is_running = False
+    status.config(fg="red", text="Inactive")
     print("The service is stopped")
+
 
 def os_name() -> str:
     return platform.system()
 
 
-def save_temp_file(seq_no: int, template_content: str):
-    try:
-        file_path = f"templates/temp_{seq_no}.html"
 
-        with open(file_path, "w", encoding="utf-8") as temp_file:
-            temp_file.write(template_content)
-        return file_path
-        
-    except:
-        return None
-
-
-
+## Returns the selected printer IP Address
 def find_printer(printer_name: str) -> str:
     if os_name() == "Windows":
         return get_printer_ip_windows(printer_name)
@@ -112,47 +134,6 @@ def open_cash_drawer(printer_socket):
     # ESC d p t command to open cash drawer (first drawer)
     command = bytes([0x1B, 0x64, 0x00, 0x1E])
     printer_socket.sendall(command)
-
-
-## Returns true if printing was successful
-## and false otherwise
-def print_to_printer(printer_ip: str, port: int, temp_file_path: str) -> bool:
-    
-    """
-       After saving html file (temp_file_path), the file needs to be
-       converted to raw format such as pdf file
-    """
-
-    file_path = ""
-    
-    # Read the contents of the file
-    with open(file_path, 'rb') as file:
-        file_data = file.read()
-
-    # Create a socket connection to the printer
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            # Connect to the printer's IP address and port
-            s.connect((printer_ip, port))
-
-            # Send the file data to the printer
-            s.sendall(file_data)
-
-            print("File sent to the printer successfully.")
-
-            ## Remove temp file
-            if os.path.exists(file_path):
-                os.remove(file_path)
-
-            if os.path.exists(temp_file_path):
-                os.remove(temp_file_path)
-            
-            return True
-        
-    except Exception as e:
-        print(f"Failed to print: {e}")
-
-        return False
     
 
 def update_queue(seq_no: int):
@@ -163,22 +144,6 @@ def update_queue(seq_no: int):
 
     if response["success"]:
         pass
-
-
-## Save server base url in local memory
-## then starts the service
-def set_api_url():
-    global base_url
-    global auth_token
-
-    base_url = urlField.get(1.0, "end-1c")
-    auth_token = tokenField.get(1.0, "end-1c") 
-
-    lbl.config(text = "Provided Input: "+auth_token)
-
-    ## Run the service in a different thread to not block GUI functionalities
-    thread = threading.Thread(target=start, daemon=True)
-    thread.start()
 
 
 ## Returns printer ip by name.
@@ -211,7 +176,30 @@ def get_printer_ip_windows(printer_name: str) -> str:
 ## If the printer was not found, returns None.
 ## Linux Only
 def get_printer_ip_linux(printer_name: str) -> str:
-    pass
+    try:
+        printer_name = printer_name.replace(" ", "_")
+        # Get list of devices
+        output = subprocess.check_output(["lpstat", "-p", "-d"]).decode("utf-8")
+        printers = output.splitlines()
+        
+        for printer in printers:
+            ## Check if device is a printer
+            if "printer" in printer:
+                printer_info = printer.split()
+                p_name = printer_info[1]
+                
+                # Get device URI to extract IP address
+                if p_name == printer_name:
+                    uri_output = subprocess.check_output(["lpstat", "-v"]).decode("utf-8")
+                    for line in uri_output.splitlines():
+                        if p_name in line:
+                            uri = line.split("://")[1]
+                            ip_address = uri.split("/")[0]
+                            return ip_address
+        return None
+
+    except subprocess.CalledProcessError as e:
+        return None
 
 
 ################################################################
@@ -236,46 +224,86 @@ root = Tk()
 # root window title and dimension
 root.title("Printing Hub")
 
-center_window(root, 700, 550)
+center_window(root, 400, 300)
+
+# Configure the root window's grid to make column 0 expandable
+root.grid_columnconfigure(0, weight=1)
+root.grid_rowconfigure(0, weight=1)
+
+main_frame = tk.Frame(root)
+main_frame.grid(row=0, column=0, sticky="new")
+
+list_frame = tk.Frame(root)
+list_frame.grid(row=2, column=0, sticky="sew")
+
+# Make sure list_frame takes all available space
+list_frame.grid_columnconfigure(0, weight=1)
+
+### First row ###
+urlLabel = tk.Label(
+    main_frame, 
+    text="URL: "
+) 
+urlLabel.grid(row=0, column=0)
 
 # URL Textbox
-urlField = tk.Text(
-    root, 
-    height = 5, 
-    width = 20,
+urlField = tk.Entry(
+    main_frame, 
 ) 
+urlField.grid(row=0, column=1)
 
-urlField.pack()
+statusLabel = tk.Label(
+    main_frame, 
+    text="Status: "
+) 
+statusLabel.grid(row=0, column=2)
 
+status = tk.Label(
+    main_frame, 
+    text="Inactive",
+    fg="red",
+) 
+status.grid(row=0, column=3)
+
+### Second row ###
+tokenLabel = tk.Label(
+    main_frame, 
+    text="Auth Token: "
+) 
+tokenLabel.grid(row=1, column=0)
 
 # Token Textbox 
-tokenField = tk.Text(
-    root, 
-    height = 1, 
-    width = 20,
+tokenField = tk.Entry(
+    main_frame, 
 ) 
+tokenField.grid(row=1, column=1)
 
-tokenField.pack() 
-
+### Third row ###
 # Button Start 
-printButton = tk.Button(
-    root,
-    text = "Start",
-    command = set_api_url,
-) 
-printButton.pack()
+startButton = tk.Button(
+    main_frame,
+    text="Start",
+    command=None,  # Replace with your function
+)
+startButton.grid(row=3, column=0)
 
 # Button Stop 
-printButton = tk.Button(
-    root,
-    text = "Stop",
-    command = stop,
-) 
-printButton.pack() 
+stopButton = tk.Button(
+    main_frame,
+    text="Stop",
+    command=None,  # Replace with your function
+)
+stopButton.grid(row=3, column=1)
 
-# Label Creation 
-lbl = tk.Label(root, text = "") 
-lbl.pack()
+### Fourth row ###
+printersLabel = tk.Label(
+    list_frame, 
+    text="Printers:"
+) 
+printersLabel.grid(row=0, column=0, sticky="w")
+
+printers_list = tk.Listbox(list_frame)
+printers_list.grid(row=1, column=0, sticky="ew")
 
 root.mainloop()
 
